@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/smfh110994/chirpy/internal/auth"
+	"github.com/smfh110994/chirpy/internal/database"
 )
 
 func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
@@ -17,7 +18,8 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 
 	type response struct {
 		User
-		Token string `json:"token"` // 👈 Return the signed JWT
+		Token        string `json:"token"` // 👈 Return the signed JWT
+		RefreshToken string `json:"refresh_token"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -42,22 +44,31 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set default expiration duration (1 hour)
-	defaultExpiration := time.Hour
-	if params.ExpiresInSeconds != nil {
-		requestedDuration := time.Duration(*params.ExpiresInSeconds) * time.Second
-		if requestedDuration < defaultExpiration {
-			defaultExpiration = requestedDuration
-		}
-	}
-
-	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, defaultExpiration)
+	// 1. Generate Access Token (1-hour lifespan)
+	accessToken, err := auth.MakeJWT(user.ID, cfg.jwtSecret, time.Hour)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't create JWT")
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create access token")
 		return
 	}
 
-	// 3. Return 200 OK with User payload
+	// 2. Generate Refresh Token string
+	refreshTokenString, err := auth.MakeRefreshToken()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create refresh token")
+		return
+	}
+
+	// 3. Save Refresh Token in Database (expires in 60 days)
+	_, err = cfg.DB.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshTokenString,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().UTC().Add(time.Hour * 24 * 60),
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't save refresh token")
+		return
+	}
+
 	respondWithJSON(w, http.StatusOK, response{
 		User: User{
 			ID:        user.ID,
@@ -65,6 +76,7 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: user.UpdatedAt,
 			Email:     user.Email,
 		},
-		Token: token,
+		Token:        accessToken,
+		RefreshToken: refreshTokenString,
 	})
 }
