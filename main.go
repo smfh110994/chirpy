@@ -1,25 +1,143 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/pressly/goose/v3"
 	"github.com/smfh110994/chirpy/internal/database"
 )
+
+func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
+	// 1. Extract the path value from URL
+	chirpIDString := r.PathValue("chirpID")
+
+	// 2. Parse the string into a UUID
+	chirpID, err := uuid.Parse(chirpIDString)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid chirp ID")
+		return
+	}
+
+	// 3. Retrieve the chirp from the database
+	dbChirp, err := cfg.DB.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			respondWithError(w, http.StatusNotFound, "Chirp not found")
+			return
+		}
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get chirp")
+		return
+	}
+
+	// 4. Respond with 200 OK and the formatted chirp
+	respondWithJSON(w, http.StatusOK, Chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	})
+}
+
+func (cfg *apiConfig) handlerChirpsRetrieve(w http.ResponseWriter, r *http.Request) {
+	// 1. Fetch chirps from the database
+	dbChirps, err := cfg.DB.GetChirps(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+		return
+	}
+
+	// 2. Map database model structs to response JSON structs
+	chirps := []Chirp{}
+	for _, dbChirp := range dbChirps {
+		chirps = append(chirps, Chirp{
+			ID:        dbChirp.ID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+		})
+	}
+
+	// 3. Respond with HTTP 200 OK and the list of chirps
+	respondWithJSON(w, http.StatusOK, chirps)
+}
+
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
+
+func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't decode parameters")
+		return
+	}
+
+	// Port validation rules: clean and length checks
+	const maxChirpLength = 140
+	if len(params.Body) > maxChirpLength {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	// Clean profane words if your previous step required it
+	cleanedBody := getCleanedBody(params.Body)
+
+	// Save to the database
+	chirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Body:      cleanedBody,
+		UserID:    params.UserID,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp")
+		return
+	}
+
+	// Respond with 201 Created and the row layout
+	respondWithJSON(w, http.StatusCreated, Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	})
+}
 
 // 1. Create a struct to hold the state (in-memory counter)
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	// DB holds our SQLC generated type-safe database queries interface
-	DB *database.Queries
+	DB       *database.Queries
+	DBConn   *sql.DB
+	platform string
 }
 
 // 2. Middleware that increments fileserverHits on every request
@@ -57,6 +175,20 @@ func (cfg *apiConfig) handlerRoot(w http.ResponseWriter, r *http.Request) {
 
 // 6. Handler method that resets the hit count back to 0
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
+	// Block this endpoint completely unless we are running locally in dev mode
+	if cfg.platform != "dev" {
+		respondWithError(w, http.StatusForbidden, "Forbidden: Only allowed in dev environment")
+		return
+	}
+
+	// Clean out all user data records using SQLC
+	err := cfg.DB.ResetUsers(r.Context())
+	if err != nil {
+		log.Printf("ERROR: ResetUsers failed: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Could not reset users table")
+		return
+	}
+
 	cfg.fileserverHits.Store(0)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -153,6 +285,30 @@ func getCleanedBody(body string) string {
 	return strings.Join(words, " ")
 }
 
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+func (cfg *apiConfig) getUserPasswordColumn(ctx context.Context) (string, error) {
+	var columnName string
+	err := cfg.DBConn.QueryRowContext(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		AND table_name = 'users'
+		AND column_name IN ('hashed_password', 'password_hash')
+		ORDER BY CASE column_name WHEN 'hashed_password' THEN 1 WHEN 'password_hash' THEN 2 ELSE 3 END
+		LIMIT 1
+	`).Scan(&columnName)
+	if err != nil {
+		return "", err
+	}
+	return columnName, nil
+}
+
 func main() {
 	// 1. Load the .env configuration file into memory
 	err := godotenv.Load()
@@ -173,13 +329,33 @@ func main() {
 	}
 	defer db.Close()
 
-	// 4. Create a new SQLC database query instance wrapped around our connection pool
+	if err := goose.Up(db, "sql/schema"); err != nil {
+		log.Fatalf("Error applying migrations: %v", err)
+	}
+
+	if _, err := db.ExecContext(context.Background(), `
+		CREATE TABLE IF NOT EXISTS users (
+			id UUID PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			email TEXT NOT NULL UNIQUE
+		);
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS hashed_password TEXT;
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+	`); err != nil {
+		log.Fatalf("Error ensuring user password columns: %v", err)
+	}
+
 	dbQueries := database.New(db)
 
-	mux := http.NewServeMux()
+	apiCfg := &apiConfig{
+		DB:       dbQueries,
+		DBConn:   db,
+		platform: os.Getenv("PLATFORM"),
+	}
+	// 4. Create a new SQLC database query instance wrapped around our connection pool
 
-	// Initialize our stateful configuration struct
-	apiCfg := &apiConfig{}
+	mux := http.NewServeMux()
 
 	// Let's assume you have a file server handling static files under /app/
 	// (Adjust directory path as needed for your project structure)
@@ -193,7 +369,11 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", handlerReadiness)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
-	mux.HandleFunc("POST /api/validate_chirp", handlerChirpsValidate)
+	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
+	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsRetrieve)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGet)
+	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 
 	// Start the server (adjust port as necessary, default is usually :8080)
 	server := &http.Server{
