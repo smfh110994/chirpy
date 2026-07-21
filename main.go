@@ -398,6 +398,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
+	mux.HandleFunc("PUT /api/users", apiCfg.handlerUsersUpdate)
 
 	// Start the server (adjust port as necessary, default is usually :8080)
 	server := &http.Server{
