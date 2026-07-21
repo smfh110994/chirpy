@@ -154,6 +154,7 @@ type apiConfig struct {
 	DBConn    *sql.DB
 	platform  string
 	jwtSecret string
+	polkaKey  string
 }
 
 // 2. Middleware that increments fileserverHits on every request
@@ -370,11 +371,17 @@ func main() {
 
 	dbQueries := database.New(db)
 
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("POLKA_KEY environment variable is not set")
+	}
+
 	apiCfg := &apiConfig{
 		DB:        dbQueries,
 		DBConn:    db,
 		platform:  os.Getenv("PLATFORM"),
 		jwtSecret: jwtSecret,
+		polkaKey:  polkaKey,
 	}
 	// 4. Create a new SQLC database query instance wrapped around our connection pool
 

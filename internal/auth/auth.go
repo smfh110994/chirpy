@@ -31,3 +31,19 @@ func GetBearerToken(headers http.Header) (string, error) {
 
 	return strings.TrimSpace(splitAuth[1]), nil
 }
+
+// GetAPIKey extracts the API key from the Authorization header.
+// Expects header format: Authorization: ApiKey THE_KEY_HERE
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("no authorization header provided")
+	}
+
+	splitAuth := strings.Split(authHeader, " ")
+	if len(splitAuth) < 2 || splitAuth[0] != "ApiKey" {
+		return "", errors.New("malformed authorization header")
+	}
+
+	return strings.TrimSpace(splitAuth[1]), nil
+}
