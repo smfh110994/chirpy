@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/pressly/goose/v3"
+	"github.com/smfh110994/chirpy/internal/auth"
 	"github.com/smfh110994/chirpy/internal/database"
 )
 
@@ -90,9 +91,23 @@ func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request
 		UserID uuid.UUID `json:"user_id"`
 	}
 
+	// 1. Extract Bearer token from header
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT")
+		return
+	}
+
+	// 2. Validate token & parse userID
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid token")
+		return
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Couldn't decode parameters")
 		return
@@ -114,7 +129,7 @@ func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 		Body:      cleanedBody,
-		UserID:    params.UserID,
+		UserID:    userID,
 	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp")
@@ -135,9 +150,10 @@ func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	// DB holds our SQLC generated type-safe database queries interface
-	DB       *database.Queries
-	DBConn   *sql.DB
-	platform string
+	DB        *database.Queries
+	DBConn    *sql.DB
+	platform  string
+	jwtSecret string
 }
 
 // 2. Middleware that increments fileserverHits on every request
@@ -346,12 +362,18 @@ func main() {
 		log.Fatalf("Error ensuring user password columns: %v", err)
 	}
 
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is not set")
+	}
+
 	dbQueries := database.New(db)
 
 	apiCfg := &apiConfig{
-		DB:       dbQueries,
-		DBConn:   db,
-		platform: os.Getenv("PLATFORM"),
+		DB:        dbQueries,
+		DBConn:    db,
+		platform:  os.Getenv("PLATFORM"),
+		jwtSecret: jwtSecret,
 	}
 	// 4. Create a new SQLC database query instance wrapped around our connection pool
 
