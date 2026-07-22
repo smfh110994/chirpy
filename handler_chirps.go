@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/smfh110994/chirpy/internal/auth"
@@ -67,6 +68,9 @@ func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1. Read the optional "sort" query parameter
+	sortParam := r.URL.Query().Get("sort")
+
 	// 2. Map database Chirp models to response Chirp struct
 	chirps := []Chirp{}
 	for _, dbChirp := range dbChirps {
@@ -78,6 +82,15 @@ func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
 			UserID:    dbChirp.UserID,
 		})
 	}
+
+	// 3. Sort the chirps slice in-memory
+	sort.Slice(chirps, func(i, j int) bool {
+		if sortParam == "desc" {
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+		}
+		// Default to ascending order ("asc")
+		return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+	})
 
 	respondWithJSON(w, http.StatusOK, chirps)
 }
