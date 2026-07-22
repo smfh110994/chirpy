@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,62 +19,6 @@ import (
 	"github.com/smfh110994/chirpy/internal/auth"
 	"github.com/smfh110994/chirpy/internal/database"
 )
-
-func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
-	// 1. Extract the path value from URL
-	chirpIDString := r.PathValue("chirpID")
-
-	// 2. Parse the string into a UUID
-	chirpID, err := uuid.Parse(chirpIDString)
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid chirp ID")
-		return
-	}
-
-	// 3. Retrieve the chirp from the database
-	dbChirp, err := cfg.DB.GetChirp(r.Context(), chirpID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			respondWithError(w, http.StatusNotFound, "Chirp not found")
-			return
-		}
-		respondWithError(w, http.StatusInternalServerError, "Couldn't get chirp")
-		return
-	}
-
-	// 4. Respond with 200 OK and the formatted chirp
-	respondWithJSON(w, http.StatusOK, Chirp{
-		ID:        dbChirp.ID,
-		CreatedAt: dbChirp.CreatedAt,
-		UpdatedAt: dbChirp.UpdatedAt,
-		Body:      dbChirp.Body,
-		UserID:    dbChirp.UserID,
-	})
-}
-
-func (cfg *apiConfig) handlerChirpsRetrieve(w http.ResponseWriter, r *http.Request) {
-	// 1. Fetch chirps from the database
-	dbChirps, err := cfg.DB.GetChirps(r.Context())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
-		return
-	}
-
-	// 2. Map database model structs to response JSON structs
-	chirps := []Chirp{}
-	for _, dbChirp := range dbChirps {
-		chirps = append(chirps, Chirp{
-			ID:        dbChirp.ID,
-			CreatedAt: dbChirp.CreatedAt,
-			UpdatedAt: dbChirp.UpdatedAt,
-			Body:      dbChirp.Body,
-			UserID:    dbChirp.UserID,
-		})
-	}
-
-	// 3. Respond with HTTP 200 OK and the list of chirps
-	respondWithJSON(w, http.StatusOK, chirps)
-}
 
 type Chirp struct {
 	ID        uuid.UUID `json:"id"`
@@ -381,7 +324,6 @@ func main() {
 		DBConn:    db,
 		platform:  os.Getenv("PLATFORM"),
 		jwtSecret: jwtSecret,
-		polkaKey:  polkaKey,
 	}
 	// 4. Create a new SQLC database query instance wrapped around our connection pool
 
@@ -401,7 +343,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
-	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsRetrieve)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsGet)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGet)
 	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
